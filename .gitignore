@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+installer/output/
+*.db
+*.sqlite
+.vscode/
+.idea/
+
+# Downloaded Tesseract binaries (~176MB) - re-fetched via scripts/fetch_tesseract.ps1
+resources/tesseract/
+
+# pytest
+.pytest_cache/

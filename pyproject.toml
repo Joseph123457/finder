@@ -1,0 +1,13 @@
+[project]
+name = "jean-finder"
+version = "0.1.0"
+description = "JeAn Finder - Full-text search for documents in Windows folders"
+requires-python = ">=3.11"
+authors = [{ name = "JeAn Finder Team" }]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
