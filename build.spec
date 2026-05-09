@@ -28,7 +28,7 @@ if tess_dir.exists():
             rel = p.parent.relative_to(ROOT)
             datas.append((str(p), str(rel)))
 else:
-    print("[build.spec] WARNING: resources/tesseract not found — OCR disabled in build")
+    print("[build.spec] WARNING: resources/tesseract not found - OCR disabled in build")
 
 # PyMuPDF 리소스 (있으면)
 try:

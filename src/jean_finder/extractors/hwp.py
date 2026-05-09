@@ -28,6 +28,12 @@ class HwpExtractor(BaseExtractor):
             raise ExtractorError(f"olefile not installed: {e}")
 
         if not olefile.isOleFile(str(path)):
+            # .hwp 확장자지만 실제로는 HWPX(ZIP) 인 경우가 종종 있다 -> 위임.
+            with open(path, "rb") as f:
+                magic = f.read(4)
+            if magic.startswith(b"PK\x03\x04"):
+                from .hwpx import HwpxExtractor
+                return HwpxExtractor().extract(path)
             raise ExtractorError("Not an OLE compound file (.hwp)")
 
         ole = olefile.OleFileIO(str(path))

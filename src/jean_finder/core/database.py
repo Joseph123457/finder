@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
+
+
+# Why: PDF/HWPX/DOCX 등 일부 추출기가 내놓은 본문 텍스트에 lone surrogate
+# (U+D800~U+DFFF) 가 섞여 들어오면 SQLite UTF-8 저장 시
+# 'utf-8 codec can't encode ... surrogates not allowed' 가 발생해
+# 진행 중인 인덱싱 트랜잭션 전체가 롤백된다. 파일 1개 본문이 깨졌다고
+# 1만개 인덱싱이 통째로 죽는 일을 막기 위해 DB write 직전 한 곳에서 정화한다.
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+_REPLACEMENT_CHAR = "�"
+
+
+def _sanitize_text(s: str) -> str:
+    if not s:
+        return s
+    return _LONE_SURROGATE_RE.sub(_REPLACEMENT_CHAR, s)
 
 
 SCHEMA = """
@@ -82,7 +98,7 @@ class Database:
         with self.transaction() as c:
             c.execute(
                 "INSERT OR IGNORE INTO scan_roots(path, added_at) VALUES (?, ?)",
-                (str(path), int(time.time())),
+                (_sanitize_text(str(path)), int(time.time())),
             )
 
     def list_scan_roots(self) -> list[str]:
@@ -92,13 +108,31 @@ class Database:
         with self.transaction() as c:
             c.execute(
                 "UPDATE scan_roots SET last_scan=? WHERE path=?",
-                (int(time.time()), str(path)),
+                (int(time.time()), _sanitize_text(str(path))),
             )
+
+    def post_scan_optimize(self) -> None:
+        """대량 인덱싱 후 검색 성능을 위해 한 번 호출.
+
+        - WAL 체크포인트(TRUNCATE): WAL이 커지면 읽기 latency 증가
+        - ANALYZE: 옵티마이저 통계 갱신
+        - FTS5 'optimize': 토큰 인덱스 병합 (선택적, 큰 인덱스에서 효과 큼)
+        """
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._conn.execute("ANALYZE")
+            self._conn.execute("INSERT INTO file_contents(file_contents) VALUES('optimize')")
+            self._conn.commit()
+        except sqlite3.Error:
+            # 최적화 실패는 치명적이지 않다(검색은 여전히 동작).
+            pass
 
     # ---- file upsert -------------------------------------------------------
 
     def get_file_mtime(self, path: str) -> Optional[int]:
-        row = self._conn.execute("SELECT mtime FROM files WHERE path=?", (path,)).fetchone()
+        row = self._conn.execute(
+            "SELECT mtime FROM files WHERE path=?", (_sanitize_text(path),)
+        ).fetchone()
         return row[0] if row else None
 
     def upsert_file(
@@ -139,6 +173,13 @@ class Database:
         content: str,
         status: str,
     ) -> int:
+        path = _sanitize_text(path)
+        filename = _sanitize_text(filename)
+        folder = _sanitize_text(folder)
+        ext = _sanitize_text(ext)
+        content = _sanitize_text(content)
+        status = _sanitize_text(status)
+
         now = int(time.time())
         cur = c.execute("SELECT id FROM files WHERE path=?", (path,))
         row = cur.fetchone()

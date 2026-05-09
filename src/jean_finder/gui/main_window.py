@@ -96,6 +96,21 @@ class ResultModel(QAbstractTableModel):
             return self._hits[row]
         return None
 
+    def sort(self, column: int, order=Qt.AscendingOrder) -> None:
+        # 결과는 ≤200건이라 인메모리 정렬로 충분.
+        keys = {
+            0: lambda h: (h.filename or "").lower(),
+            1: lambda h: (h.snippet or "").lower(),
+            2: lambda h: (h.folder or "").lower(),
+            3: lambda h: h.mtime,
+        }
+        key = keys.get(column)
+        if key is None:
+            return
+        self.beginResetModel()
+        self._hits.sort(key=key, reverse=(order == Qt.DescendingOrder))
+        self.endResetModel()
+
 
 # ----- 인덱싱 워커 스레드 ----------------------------------------------------
 
@@ -149,15 +164,22 @@ class ScanDialog(QDialog):
     def __init__(self, parent: QWidget, cfg: AppConfig, roots: List[Path]):
         super().__init__(parent)
         self.setWindowTitle("폴더 스캔 중…")
-        self.resize(520, 140)
+        self.resize(560, 200)
         self.cfg = cfg
         self.roots = roots
 
         self.label = QLabel("준비 중…")
+        self.label.setWordWrap(True)
         self.bar = QProgressBar()
         self.bar.setRange(0, 0)  # busy
         self.cancel_btn = QPushButton("취소")
         self.cancel_btn.clicked.connect(self.reject)
+        # 완료 후 사용자가 결과를 충분히 볼 수 있도록 자동으로 닫지 않는다.
+        # 완료되면 이 버튼이 '닫기' 로 바뀐다.
+        self.close_btn = QPushButton("닫기")
+        self.close_btn.clicked.connect(self.accept)
+        self.close_btn.setVisible(False)
+        self.close_btn.setDefault(True)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.label)
@@ -165,6 +187,7 @@ class ScanDialog(QDialog):
         btns = QHBoxLayout()
         btns.addStretch()
         btns.addWidget(self.cancel_btn)
+        btns.addWidget(self.close_btn)
         layout.addLayout(btns)
 
         self.thread = QThread(self)
@@ -190,7 +213,20 @@ class ScanDialog(QDialog):
         self.final_progress = p
         self.thread.quit()
         self.thread.wait()
-        self.accept()
+        # 자동으로 닫지 않고 사용자가 닫기 누를 때까지 결과를 보여준다.
+        self.setWindowTitle("스캔 완료")
+        self.bar.setRange(0, 1)
+        self.bar.setValue(1)
+        total = p.indexed + p.skipped + p.failed
+        self.label.setText(
+            f"스캔 완료\n"
+            f"  • 인덱싱 성공: {p.indexed:,}\n"
+            f"  • 변경 없음(스킵): {p.skipped:,}\n"
+            f"  • 실패: {p.failed:,}\n"
+            f"  • 합계: {total:,}"
+        )
+        self.cancel_btn.setVisible(False)
+        self.close_btn.setVisible(True)
 
     @Slot(str)
     def _on_failed(self, msg: str) -> None:
@@ -258,20 +294,23 @@ class MainWindow(QMainWindow):
         self.table = QTableView(self)
         self.table.setModel(self.model)
         self.table.setSelectionBehavior(QTableView.SelectRows)
-        self.table.setSortingEnabled(False)
+        self.table.setSortingEnabled(True)  # 헤더 클릭으로 컬럼 정렬
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableView.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.doubleClicked.connect(self._on_double_clicked)
+        # 한글 긴 경로/파일명도 양 끝이 보이게 가운데 생략.
+        self.table.setTextElideMode(Qt.ElideMiddle)
 
+        # 폴더 경로가 가장 길어지므로 stretch 받게 한다. 스니펫은 ~25자라 고정.
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Interactive)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.table.setColumnWidth(0, 220)
-        self.table.setColumnWidth(2, 260)
+        self.table.setColumnWidth(0, 240)
+        self.table.setColumnWidth(1, 320)
 
         v.addWidget(self.table, 1)
 
@@ -281,10 +320,11 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("")
         self.status.addWidget(self.status_label, 1)
 
-        # debounce 타이머
+        # debounce 타이머: 한글은 IME 합성 중에 textChanged가 자주 발생하므로
+        # 충분히 길게 잡아 합성 끝난 다음에야 검색이 돌도록 한다.
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(180)
+        self._search_timer.setInterval(280)
         self._search_timer.timeout.connect(self._run_search_now)
 
     # ---- 검색 ----------------------------------------------------------
@@ -298,9 +338,11 @@ class MainWindow(QMainWindow):
             self.model.set_hits([])
             self._refresh_status(extra=f"검색: '{text}' (3자 이상 입력)" if text else None)
             return
-        hits = self.searcher.search(text, limit=500)
+        # limit 200: 한 번에 모두 보지 않으므로 500 -> 200 으로 줄여 snippet() 계산 비용 절감.
+        hits = self.searcher.search(text, limit=200)
         self.model.set_hits(hits)
-        self._refresh_status(extra=f"'{text}' 결과 {len(hits)}건")
+        suffix = "+" if len(hits) >= 200 else ""
+        self._refresh_status(extra=f"'{text}' 결과 {len(hits)}{suffix}건")
 
     def _refresh_status(self, extra: Optional[str] = None) -> None:
         stats = self.db.stats()
@@ -352,8 +394,12 @@ class MainWindow(QMainWindow):
             )
             if p.warnings:
                 preview = "\n".join(p.warnings[:10])
-                more = f"\n…({len(p.warnings) - 10}건 추가)" if len(p.warnings) > 10 else ""
-                QMessageBox.warning(self, "경고", preview + more)
+                more = f"\n…({len(p.warnings) - 10}건 더)" if len(p.warnings) > 10 else ""
+                title = (
+                    f"스캔 완료 — 인덱싱 {p.indexed}건, 스킵 {p.skipped}건, "
+                    f"실패 {p.failed}건"
+                )
+                QMessageBox.warning(self, title, preview + more)
             self._run_search_now()
 
     # ---- 우클릭/더블클릭 ----------------------------------------------

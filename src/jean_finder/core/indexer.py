@@ -87,9 +87,10 @@ class Indexer:
         if to_extract:
             self._run_parallel(to_extract, progress, progress_cb)
 
-        # 3) 스캔 루트 타임스탬프 갱신
+        # 3) 스캔 루트 타임스탬프 갱신 + 검색 최적화
         for root in roots_list:
             self.db.update_scan_root_timestamp(root)
+        self.db.post_scan_optimize()
 
         return progress
 
